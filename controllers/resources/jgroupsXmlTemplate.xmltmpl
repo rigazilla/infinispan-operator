@@ -1,0 +1,48 @@
+<config xmlns="urn:org:jgroups"
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+xsi:schemaLocation="urn:org:jgroups http://www.jgroups.org/schema/jgroups-4.0.xsd"
+>
+
+{{if eq (.XSite.Transport | UpperCase) "TUNNEL" }}
+<TUNNEL bind_addr="${jgroups.relay.bind.address,infinispan.bind.address}"
+	bind_port="${jgroups.relay.bind.port:{{.JGroups.Relay.BindPort}} }"
+	enable_diagnostics="{{.JGroups.Diagnostics}}"
+	port_range="0"
+	gossip_router_hosts="{{.XSite.Address}}[{{.XSite.Port}}],{{RemoteSites .XSite.Backups}}"
+/>
+
+<PING return_entire_cache="true"/>
+{{else}}
+<TCP bind_addr="${jgroups.relay.bind.address,infinispan.bind.address}"
+ bind_port="${jgroups.relay.bind.port:{{.JGroups.Relay.BindPort}} }"
+ enable_diagnostics="{{.JGroups.Diagnostics}}"
+ external_addr="{{.XSite.Address}}"
+ external_port="{{.XSite.Port}}"
+ port_range="0"
+/>
+
+<TCPPING initial_hosts="{{.XSite.Address}}[{{.XSite.Port}}],{{RemoteSites .XSite.Backups}}"
+	 port_range="0"
+/>
+{{end}}
+
+<MERGE3/>
+
+<FD_SOCK client_bind_port="57600" start_port="57600"/>
+
+<FD_ALL timeout="180000"/>
+
+<VERIFY_SUSPECT/>
+
+<pbcast.NAKACK2 use_mcast_xmit="false"/>
+
+<UNICAST3/>
+
+<pbcast.STABLE/>
+
+<pbcast.GMS/>
+
+<MFC/>
+
+<FRAG3/>
+</config>

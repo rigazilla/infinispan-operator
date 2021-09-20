@@ -108,13 +108,12 @@ func PodResources(spec infinispanv1.InfinispanContainerSpec) (*corev1.ResourceRe
 
 func PodEnv(i *infinispanv1.Infinispan, systemEnv *[]corev1.EnvVar) []corev1.EnvVar {
 	envVars := []corev1.EnvVar{
-		{Name: "CONFIG_PATH", Value: consts.ServerConfigPath},
 		// Prevent the image from generating a user if authentication disabled
 		{Name: "MANAGED_ENV", Value: "TRUE"},
 		{Name: "JAVA_OPTIONS", Value: i.GetJavaOptions()},
 		{Name: "EXTRA_JAVA_OPTIONS", Value: i.Spec.Container.ExtraJvmOpts},
 		{Name: "DEFAULT_IMAGE", Value: consts.DefaultImageName},
-		{Name: "ADMIN_IDENTITIES_PATH", Value: consts.ServerAdminIdentitiesPath},
+		{Name: "POD_IP", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}},
 	}
 
 	// Adding additional variables listed in ADDITIONAL_VARS env var
@@ -130,10 +129,6 @@ func PodEnv(i *infinispanv1.Infinispan, systemEnv *[]corev1.EnvVar) []corev1.Env
 				}
 			}
 		}
-	}
-
-	if i.IsAuthenticationEnabled() {
-		envVars = append(envVars, corev1.EnvVar{Name: "IDENTITIES_PATH", Value: consts.ServerUserIdentitiesPath})
 	}
 
 	if systemEnv != nil {

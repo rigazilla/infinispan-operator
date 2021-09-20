@@ -14,10 +14,12 @@ import (
 	hash "github.com/infinispan/infinispan-operator/pkg/hash"
 	ispn "github.com/infinispan/infinispan-operator/pkg/infinispan"
 	"github.com/infinispan/infinispan-operator/pkg/infinispan/caches"
+	config "github.com/infinispan/infinispan-operator/pkg/infinispan/configuration"
 	kube "github.com/infinispan/infinispan-operator/pkg/kubernetes"
 	routev1 "github.com/openshift/api/route/v1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"github.com/prometheus/common/log"
+	"gopkg.in/yaml.v2"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	ingressv1 "k8s.io/api/networking/v1"
@@ -43,18 +45,24 @@ import (
 const (
 	ServerRoot                  = "/opt/infinispan/server"
 	DataMountPath               = ServerRoot + "/data"
+	OperatorConfMountPath       = ServerRoot + "/conf/operator"
 	DataMountVolume             = "data-volume"
 	ConfigVolumeName            = "config-volume"
 	EncryptKeystoreVolumeName   = "encrypt-volume"
 	EncryptTruststoreVolumeName = "encrypt-trust-volume"
 	IdentitiesVolumeName        = "identities-volume"
 	AdminIdentitiesVolumeName   = "admin-identities-volume"
+	OverlayConfigVolumeName     = "overlay-config-volume"
+	InfinispanXmlVolumeName     = "infinispan-xml-volume"
+	OverlayConfigMountPath      = "/opt/infinispan/server/conf/overlay"
 
 	EventReasonPrelimChecksFailed    = "PrelimChecksFailed"
 	EventReasonLowPersistenceStorage = "LowPersistenceStorage"
 	EventReasonEphemeralStorage      = "EphemeralStorageEnables"
 	EventReasonParseValueProblem     = "ParseValueProblem"
 	EventLoadBalancerUnsupported     = "LoadBalancerUnsupported"
+
+	InfinispanStartupTemplate = "[ -f /etc/encrypt/keystore/tls.crt ] && [ -f /etc/encrypt/keystore/tls.key ] && openssl pkcs12 -export -out /opt/infinispan/server/conf/keystore.p12 -in /etc/encrypt/keystore/tls.crt -inkey /etc/encrypt/keystore/tls.key -password pass:%s --name %s; exec /opt/infinispan/bin/server.sh -Dinfinispan.bind.address=$(POD_IP) %s -c operator/infinispan.xml"
 )
 
 // InfinispanReconciler reconciles a Infinispan object
@@ -257,11 +265,42 @@ func (reconciler *InfinispanReconciler) Reconcile(ctx context.Context, ctrlReque
 		return *result, err
 	}
 
+	// Wait for the ConfigMap to be created by config-controller
+	infinispanXmlSecret := &corev1.Secret{}
+	if result, err := kube.LookupResource(infinispan.GetInfinispanXmlConfigName(), infinispan.Namespace, infinispanXmlSecret, r.Client, reqLogger, r.eventRec, r.ctx); result != nil {
+		return *result, err
+	}
+
+	// If an overlay configuration is specified wait for the related ConfigMap
+	overlayConfigMap := &corev1.ConfigMap{}
+	var overlayConfigMapKey string
+	if infinispan.Spec.ConfigMapName != "" {
+		if result, err := kube.LookupResource(infinispan.Spec.ConfigMapName, infinispan.Namespace, overlayConfigMap, r.Client, reqLogger, r.eventRec, r.ctx); result != nil {
+			return *result, err
+		}
+		var foundKey bool
+		// Loop through the data looking for something like xml,json or yaml
+		for overlayConfigMapKey = range overlayConfigMap.Data {
+			if overlayConfigMapKey == "infinispan-config.xml" || overlayConfigMapKey == "infinispan-config.json" || overlayConfigMapKey == "infinispan-config.yaml" {
+				foundKey = true
+				break
+			}
+		}
+		if !foundKey {
+			err := fmt.Errorf("infinispan-copnfig.[xml|yaml|json] configuration not found in ConfigMap: %s", overlayConfigMap.Name)
+			return reconcile.Result{}, err
+		}
+	}
+
 	// Wait for the Secret to be created by secret-controller or provided by user
-	var userSecret *corev1.Secret
+	var userSecret, userPropsSecret *corev1.Secret
 	if infinispan.IsAuthenticationEnabled() {
 		userSecret = &corev1.Secret{}
 		if result, err := kube.LookupResource(infinispan.GetSecretName(), infinispan.Namespace, userSecret, r.Client, reqLogger, r.eventRec, r.ctx); result != nil {
+			return *result, err
+		}
+		userPropsSecret = &corev1.Secret{}
+		if result, err := kube.LookupResource(infinispan.GetSecretName(), infinispan.Namespace, userPropsSecret, r.Client, reqLogger, r.eventRec, r.ctx); result != nil {
 			return *result, err
 		}
 	}
@@ -357,7 +396,7 @@ func (reconciler *InfinispanReconciler) Reconcile(ctx context.Context, ctrlReque
 		reqLogger.Info("Configuring the StatefulSet")
 
 		// Define a new StatefulSet
-		statefulSet, err = r.statefulSetForInfinispan(adminSecret, userSecret, keystoreSecret, trustSecret, configMap)
+		statefulSet, err = r.statefulSetForInfinispan(adminSecret, userSecret, userPropsSecret, keystoreSecret, trustSecret, configMap, overlayConfigMap, infinispanXmlSecret, overlayConfigMapKey)
 		if err != nil {
 			reqLogger.Error(err, "failed to configure new StatefulSet")
 			return ctrl.Result{}, err
@@ -462,7 +501,7 @@ func (reconciler *InfinispanReconciler) Reconcile(ctx context.Context, ctrlReque
 
 	// Here where to reconcile with spec updates that reflect into
 	// changes to statefulset.spec.container.
-	res, err = r.reconcileContainerConf(statefulSet, configMap, adminSecret, userSecret, keystoreSecret, trustSecret)
+	res, err = r.reconcileContainerConf(statefulSet, configMap, overlayConfigMap, overlayConfigMapKey, adminSecret, userSecret, keystoreSecret, trustSecret)
 	if res != nil {
 		return *res, err
 	}
@@ -1013,8 +1052,8 @@ func (r *infinispanRequest) updatePodsLabels(podList *corev1.PodList) error {
 }
 
 // statefulSetForInfinispan returns an infinispan StatefulSet object
-func (r *infinispanRequest) statefulSetForInfinispan(adminSecret, userSecret, keystoreSecret, trustSecret *corev1.Secret,
-	configMap *corev1.ConfigMap) (*appsv1.StatefulSet, error) {
+func (r *infinispanRequest) statefulSetForInfinispan(adminSecret, userSecret, userPropSecret, keystoreSecret, trustSecret *corev1.Secret,
+	configMap, overlayConfigMap *corev1.ConfigMap, xmlInfinispanMap *corev1.Secret, overlayConfigMapKey string) (*appsv1.StatefulSet, error) {
 	ispn := r.infinispan
 	reqLogger := r.log.WithValues("Request.Namespace", ispn.Namespace, "Request.Name", ispn.Name)
 	lsPod := PodLabels(ispn.Name)
@@ -1047,6 +1086,9 @@ func (r *infinispanRequest) statefulSetForInfinispan(adminSecret, userSecret, ke
 		Name:      ConfigVolumeName,
 		MountPath: consts.ServerConfigRoot,
 	}, {
+		Name:      InfinispanXmlVolumeName,
+		MountPath: ServerRoot + "/conf/operator",
+	}, {
 		Name:      dataVolumeName,
 		MountPath: DataMountPath,
 	}, {
@@ -1067,10 +1109,37 @@ func (r *infinispanRequest) statefulSetForInfinispan(adminSecret, userSecret, ke
 				SecretName: ispn.GetAdminSecretName(),
 			},
 		},
-	}}
+	}, {
+		Name: InfinispanXmlVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: xmlInfinispanMap.Name,
+			},
+		},
+	},
+	}
+
+	// Adding overlay config file if present
+	if overlayConfigMap.Name != "" {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      OverlayConfigVolumeName,
+			MountPath: OverlayConfigMountPath,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: OverlayConfigVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: overlayConfigMap.Name},
+				},
+			}})
+	}
 
 	podResources, err := PodResources(ispn.Spec.Container)
 	if err != nil {
+		return nil, err
+	}
+	serverConf := &config.InfinispanConfiguration{}
+	if err = yaml.Unmarshal([]byte(configMap.Data[consts.ServerConfigFilename]), serverConf); err != nil {
 		return nil, err
 	}
 	dep := &appsv1.StatefulSet{
@@ -1103,6 +1172,7 @@ func (r *infinispanRequest) statefulSetForInfinispan(adminSecret, userSecret, ke
 						Env: PodEnv(ispn, &[]corev1.EnvVar{
 							{Name: "CONFIG_HASH", Value: hash.HashString(configMap.Data[consts.ServerConfigFilename])},
 							{Name: "ADMIN_IDENTITIES_HASH", Value: hash.HashByte(adminSecret.Data[consts.ServerIdentitiesFilename])},
+							{Name: "IDENTITIES_BATCH", Value: OperatorConfMountPath + "/" + consts.ServerIdentitiesCliFilename},
 						}),
 						LivenessProbe:  PodLivenessProbe(),
 						Ports:          PodPortsWithXsite(ispn),
@@ -1110,6 +1180,7 @@ func (r *infinispanRequest) statefulSetForInfinispan(adminSecret, userSecret, ke
 						StartupProbe:   PodStartupProbe(),
 						Resources:      *podResources,
 						VolumeMounts:   volumeMounts,
+						Args:           buildStartupArgs(overlayConfigMapKey),
 					}},
 					Volumes: volumes,
 				},
@@ -1126,7 +1197,10 @@ func (r *infinispanRequest) statefulSetForInfinispan(adminSecret, userSecret, ke
 				Value: hash.HashByte(userSecret.Data[consts.ServerIdentitiesFilename]),
 			})
 	}
-
+	if overlayConfigMapKey != "" {
+		dep.Annotations = make(map[string]string)
+		dep.Annotations["checksum/overlayConfig"] = hash.HashString(overlayConfigMap.Data[overlayConfigMapKey])
+	}
 	if !ispn.IsEphemeralStorage() {
 		// Persistent vol size must exceed memory size
 		// so that it can contain all the in memory data
@@ -1376,7 +1450,7 @@ func (r *infinispanRequest) gracefulShutdownReq(podList *corev1.PodList, logger 
 }
 
 // reconcileContainerConf reconcile the .Container struct is changed in .Spec. This needs a cluster restart
-func (r *infinispanRequest) reconcileContainerConf(statefulSet *appsv1.StatefulSet, configMap *corev1.ConfigMap, adminSecret,
+func (r *infinispanRequest) reconcileContainerConf(statefulSet *appsv1.StatefulSet, configMap, overlayConfigMap *corev1.ConfigMap, overlayConfigMapKey string, adminSecret,
 	userSecret, keystoreSecret, trustSecret *corev1.Secret) (*ctrl.Result, error) {
 	ispn := r.infinispan
 	updateNeeded := false
@@ -1434,6 +1508,18 @@ func (r *infinispanRequest) reconcileContainerConf(statefulSet *appsv1.StatefulS
 	updateNeeded = updateStatefulSetEnv(statefulSet, "CONFIG_HASH", hash.HashString(configMap.Data[consts.ServerConfigFilename])) || updateNeeded
 	updateNeeded = updateStatefulSetEnv(statefulSet, "ADMIN_IDENTITIES_HASH", hash.HashByte(adminSecret.Data[consts.ServerIdentitiesFilename])) || updateNeeded
 
+	if updateCmdArgs, err := updateStartupArgs(statefulSet, overlayConfigMapKey); err != nil {
+		return &ctrl.Result{}, err
+	} else {
+		updateNeeded = updateCmdArgs || updateNeeded
+	}
+	var hashVal string
+	if overlayConfigMapKey != "" {
+		hashVal = hash.HashString(overlayConfigMap.Data[overlayConfigMapKey])
+	}
+	updateNeeded = updateStatefulSetAnnotations(statefulSet, "checksum/overlayConfig", hashVal) || updateNeeded
+	updateNeeded = applyOverlayConfigVolume(overlayConfigMap, &statefulSet.Spec.Template.Spec) || updateNeeded
+
 	externalArtifactsUpd, err := applyExternalArtifactsDownload(ispn, &statefulSet.Spec.Template.Spec)
 	if err != nil {
 		return &ctrl.Result{}, err
@@ -1456,7 +1542,6 @@ func (r *infinispanRequest) reconcileContainerConf(statefulSet *appsv1.StatefulS
 			}
 			spec.Containers[0].Env = append(spec.Containers[0].Env,
 				corev1.EnvVar{Name: "IDENTITIES_HASH", Value: hash.HashByte(userSecret.Data[consts.ServerIdentitiesFilename])},
-				corev1.EnvVar{Name: "IDENTITIES_PATH", Value: consts.ServerUserIdentitiesPath},
 			)
 			updateNeeded = true
 		} else {
@@ -1467,9 +1552,19 @@ func (r *infinispanRequest) reconcileContainerConf(statefulSet *appsv1.StatefulS
 
 	if ispn.IsEncryptionEnabled() {
 		AddVolumesForEncryption(ispn, spec)
+		if keystoreSecret == nil {
+			// ispn, has been modified in the while, keystore
+			// can't be nil if encryption is enabled
+			return &reconcile.Result{}, fmt.Errorf("keystoreSecret is nil with encryption enabled")
+		}
 		updateNeeded = updateStatefulSetEnv(statefulSet, "KEYSTORE_HASH", hash.HashMap(keystoreSecret.Data)) || updateNeeded
 
 		if ispn.IsClientCertEnabled() {
+			if trustSecret == nil {
+				// ispn, has been modified in the while, keystore
+				// can't be nil if encryption is enabled
+				return &reconcile.Result{}, fmt.Errorf("trustSecret is nil with encryption enabled")
+			}
 			updateNeeded = updateStatefulSetEnv(statefulSet, "TRUSTSTORE_HASH", hash.HashMap(trustSecret.Data)) || updateNeeded
 		}
 	}
@@ -1522,6 +1617,30 @@ func updateStatefulSetEnv(statefulSet *appsv1.StatefulSet, envName, newValue str
 	return false
 }
 
+func updateStatefulSetAnnotations(statefulSet *appsv1.StatefulSet, name, value string) bool {
+	// Annotation has non-empty value
+	if value != "" {
+		// map doesn't exists, must be created
+		if statefulSet.Annotations == nil {
+			statefulSet.Annotations = make(map[string]string)
+		}
+		if statefulSet.Annotations[name] != value {
+			statefulSet.Annotations[name] = value
+			statefulSet.Spec.Template.Annotations["updateDate"] = time.Now().String()
+			return true
+		}
+	} else {
+		// Annotation doesn't exist
+		if statefulSet.Annotations == nil || statefulSet.Annotations[name] == "" {
+			return false
+		}
+		// delete it
+		delete(statefulSet.Annotations, name)
+		return true
+	}
+	return false
+}
+
 func findSecretInVolume(pod *corev1.PodSpec, volumeName string) (string, int) {
 	for i, volumes := range pod.Volumes {
 		if volumes.Secret != nil && volumes.Name == volumeName {
@@ -1560,4 +1679,65 @@ func (reconciler *InfinispanReconciler) isTypeSupported(kind string) bool {
 func GossipRouterPodList(infinispan *infinispanv1.Infinispan, kube *kube.Kubernetes, ctx context.Context) (*corev1.PodList, error) {
 	podList := &corev1.PodList{}
 	return podList, kube.ResourcesList(infinispan.Namespace, GossipRouterPodLabels(infinispan.Name), podList, ctx)
+}
+
+func buildStartupArgs(overlayConfigMapKey string) []string {
+	var args []string
+	if overlayConfigMapKey != "" {
+		args = []string{"-Dinfinispan.bind.address=$(POD_IP)", "-c", "overlay/" + overlayConfigMapKey, "-c", "operator/infinispan.xml"}
+	} else {
+		args = []string{"-Dinfinispan.bind.address=$(POD_IP)", "-c", "operator/infinispan.xml"}
+	}
+	return args
+}
+
+func updateStartupArgs(statefulSet *appsv1.StatefulSet, overlayConfigMapKey string) (bool, error) {
+	newArgs := buildStartupArgs(overlayConfigMapKey)
+	if len(newArgs) == len(statefulSet.Spec.Template.Spec.Containers[0].Args) {
+		var changed bool
+		for i := range newArgs {
+			if newArgs[i] != statefulSet.Spec.Template.Spec.Containers[0].Args[i] {
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			return false, nil
+		}
+	}
+	statefulSet.Spec.Template.Spec.Containers[0].Args = newArgs
+	return true, nil
+}
+
+func applyOverlayConfigVolume(configMap *corev1.ConfigMap, spec *corev1.PodSpec) bool {
+	volumes := &spec.Volumes
+	volumeMounts := &spec.Containers[0].VolumeMounts
+	volumePosition := findVolume(*volumes, OverlayConfigVolumeName)
+	if configMap.Name != "" {
+		// Add the overlay volume if needed
+		if volumePosition < 0 {
+			*volumeMounts = append(*volumeMounts, corev1.VolumeMount{Name: OverlayConfigVolumeName, MountPath: OverlayConfigMountPath})
+			*volumes = append(*volumes, corev1.Volume{
+				Name: OverlayConfigVolumeName,
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: configMap.Name}}}})
+			return true
+		} else {
+			// Update the overlay volume if needed
+			if (*volumes)[volumePosition].VolumeSource.ConfigMap.Name != configMap.Name {
+				(*volumes)[volumePosition].VolumeSource.ConfigMap.Name = configMap.Name
+				return true
+			}
+		}
+	}
+	// Delete overlay volume mount if no more needed
+	if configMap.Name == "" && volumePosition >= 0 {
+		volumeMountPosition := findVolumeMount(*volumeMounts, OverlayConfigVolumeName)
+		*volumes = append(spec.Volumes[:volumePosition], spec.Volumes[volumePosition+1:]...)
+		*volumeMounts = append(spec.Containers[0].VolumeMounts[:volumeMountPosition], spec.Containers[0].VolumeMounts[volumeMountPosition+1:]...)
+		return true
+	}
+	return false
 }

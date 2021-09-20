@@ -368,6 +368,11 @@ func (ispn *Infinispan) GetConfigName() string {
 	return fmt.Sprintf("%v-configuration", ispn.Name)
 }
 
+// GetInfinispanXmlConfigName returns the ConfigMap name for the cluster
+func (ispn *Infinispan) GetInfinispanXmlConfigName() string {
+	return fmt.Sprintf("%v-infinispan-xml", ispn.Name)
+}
+
 // GetServiceMonitorName returns the ServiceMonitor name for the cluster
 func (ispn *Infinispan) GetServiceMonitorName() string {
 	return fmt.Sprintf("%v-monitor", ispn.Name)

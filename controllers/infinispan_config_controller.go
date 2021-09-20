@@ -24,8 +24,8 @@ import (
 )
 
 const (
-	EncryptKeystoreName = "keystore.p12"
-	EncryptKeystorePath = ServerRoot + "/conf/keystore"
+	EncryptPkcs12KeystoreName = "keystore.p12"
+	EncryptPemKeystoreName    = "keystore.pem"
 )
 
 // ConfigReconciler reconciles a ConfigMap object
@@ -150,30 +150,26 @@ func (r configRequest) computeAndReconcileConfigMap(xsite *config.XSite) (*recon
 	}
 
 	jgroupsDiagnostics := consts.JGroupsDiagnosticsFlag == "TRUE"
-	serverConf := config.InfinispanConfiguration{
-		Infinispan: config.Infinispan{
-			Authorization: config.Authorization{
-				Enabled:    r.infinispan.IsAuthorizationEnabled(),
-				RoleMapper: roleMapper,
-			},
-			ClusterName: name,
-		},
-		JGroups: config.JGroups{
-			Transport: "tcp",
-			DNSPing: config.DNSPing{
-				Query: fmt.Sprintf("%s-ping.%s.svc.cluster.local", name, namespace),
-			},
-			Diagnostics: jgroupsDiagnostics,
-		},
-		Endpoints: config.Endpoints{
-			Authenticate:   r.infinispan.IsAuthenticationEnabled(),
-			DedicatedAdmin: true,
-		},
-		Logging: config.Logging{
-			Categories: r.infinispan.GetLogCategoriesForConfig(),
-		},
-	}
 
+	serverConf := config.DefaultInfinspanConfiguration()
+	// The following are missing the default yaml (consider adding there?)
+	serverConf.Endpoints.Enabled = true
+	serverConf.Endpoints.DedicatedAdmin = true
+	serverConf.JGroups.Transport = "tcp"
+	serverConf.Endpoints.Hotrod.Qop = "auth"
+	serverConf.Endpoints.Hotrod.ServerName = "infinispan"
+	serverConf.Keystore.Type = "pkcs12"
+
+	// Apply Infinispan CR settings
+	serverConf.Infinispan.Authorization.Enabled = r.infinispan.IsAuthorizationEnabled()
+	serverConf.Infinispan.Authorization.RoleMapper = roleMapper
+	serverConf.Infinispan.ClusterName = name
+	serverConf.JGroups.DNSPing.Query = fmt.Sprintf("%s-ping.%s.svc.cluster.local", name, namespace)
+	serverConf.JGroups.Diagnostics = jgroupsDiagnostics
+	serverConf.Logging.Categories = r.infinispan.GetLogCategoriesForConfig()
+
+	// Apply settings for authentication and roles
+	serverConf.Endpoints.Authenticate = r.infinispan.IsAuthenticationEnabled()
 	specRoles := r.infinispan.GetAuthorizationRoles()
 	if len(specRoles) > 0 {
 		confRoles := make([]config.AuthorizationRole, len(specRoles))
@@ -183,14 +179,13 @@ func (r configRequest) computeAndReconcileConfigMap(xsite *config.XSite) (*recon
 		serverConf.Infinispan.Authorization.Roles = confRoles
 	}
 
+	// Apply settings for cross site
 	if xsite != nil {
 		serverConf.XSite = xsite
 	}
-
 	if result, err := ConfigureServerEncryption(r.infinispan, &serverConf, r.Client, r.reqLogger, r.eventRec, r.ctx); result != nil {
 		return result, err
 	}
-
 	r.configureCloudEvent(&serverConf)
 
 	configMapObject := &corev1.ConfigMap{
@@ -259,9 +254,10 @@ func ConfigureServerEncryption(i *v1.Infinispan, c *config.InfinispanConfigurati
 
 	configureNewKeystore := func(c *config.InfinispanConfiguration) {
 		c.Keystore.CrtPath = consts.ServerEncryptKeystoreRoot
-		c.Keystore.Path = EncryptKeystorePath
-		c.Keystore.Password = "password"
-		c.Keystore.Alias = "server"
+		c.Keystore.Path = OperatorConfMountPath + "/" + EncryptPemKeystoreName
+		c.Keystore.Password = ""
+		c.Keystore.Alias = ""
+		c.Keystore.Type = "pem"
 	}
 
 	// Configure Keystore
@@ -269,15 +265,14 @@ func ConfigureServerEncryption(i *v1.Infinispan, c *config.InfinispanConfigurati
 	if result, err := kube.LookupResource(i.GetKeystoreSecretName(), i.Namespace, keystoreSecret, client, log, eventRec, ctx); result != nil {
 		return result, err
 	}
-
 	if i.IsEncryptionCertFromService() {
 		if strings.Contains(i.Spec.Security.EndpointEncryption.CertServiceName, "openshift.io") {
 			configureNewKeystore(c)
 		}
 	} else {
-		if secretContains(keystoreSecret, EncryptKeystoreName) {
+		if secretContains(keystoreSecret, EncryptPkcs12KeystoreName) {
 			// If user provide a keystore in secret then use it ...
-			c.Keystore.Path = fmt.Sprintf("%s/%s", consts.ServerEncryptKeystoreRoot, EncryptKeystoreName)
+			c.Keystore.Path = fmt.Sprintf("%s/%s", consts.ServerEncryptKeystoreRoot, EncryptPkcs12KeystoreName)
 			c.Keystore.Password = string(keystoreSecret.Data["password"])
 			c.Keystore.Alias = string(keystoreSecret.Data["alias"])
 		} else if secretContains(keystoreSecret, corev1.TLSPrivateKeyKey, corev1.TLSCertKey) {

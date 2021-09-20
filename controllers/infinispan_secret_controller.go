@@ -1,16 +1,22 @@
 package controllers
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/url"
 	"strings"
 
+	"text/template"
+
+	rice "github.com/GeertJohan/go.rice"
 	"github.com/go-logr/logr"
 	ispnv1 "github.com/infinispan/infinispan-operator/api/v1"
 	consts "github.com/infinispan/infinispan-operator/controllers/constants"
+	config "github.com/infinispan/infinispan-operator/pkg/infinispan/configuration"
 	"github.com/infinispan/infinispan-operator/pkg/infinispan/security"
 	kube "github.com/infinispan/infinispan-operator/pkg/kubernetes"
+	"gopkg.in/yaml.v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,6 +25,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	k8sctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -109,33 +116,183 @@ func (reconciler *SecretReconciler) Reconcile(ctx context.Context, request recon
 		return *result, err
 	}
 
+	var userCredSecret *corev1.Secret
+
+	// If auth is enable
+	if r.infinispan.IsAuthenticationEnabled() {
+		var err error
+		// get identities secret for users
+		if userCredSecret, err = r.getSecret(r.infinispan.GetSecretName()); err != nil {
+			return reconcile.Result{}, err
+		}
+		// or create the users identities secret if it doesn't already exist
+		if userCredSecret == nil && r.infinispan.IsGeneratedSecret() {
+			if userCredSecret, err = r.createUserIdentitiesSecret(); err != nil {
+				return reconcile.Result{}, err
+			}
+		}
+	}
+
 	// Reconcile Credential Secrets
-	if err := r.reconcileAdminSecret(); err != nil {
+	var adminCredSecret *corev1.Secret
+	var err error
+	if adminCredSecret, err = r.reconcileAdminSecret(userCredSecret); err != nil {
 		return reconcile.Result{}, err
 	}
 
-	// If the user has provided their own secret or authentication is disabled, do nothing
-	if !r.infinispan.IsAuthenticationEnabled() || !r.infinispan.IsGeneratedSecret() {
-		return reconcile.Result{}, nil
+	// Wait for the ConfigMap to be created by config-controller
+	configMap := &corev1.ConfigMap{}
+	if result, err := kube.LookupResource(infinispan.GetConfigName(), infinispan.Namespace, configMap, r.Client, reqLogger, r.eventRec, r.ctx); result != nil {
+		return *result, err
 	}
 
-	// Create the user identities secret if it doesn't already exist
-	secret, err := r.getSecret(r.infinispan.GetSecretName())
-	if secret != nil || err != nil {
+	// turn yaml into var
+	serverConf := &config.InfinispanConfiguration{}
+	if err = yaml.Unmarshal([]byte(configMap.Data[consts.ServerConfigFilename]), serverConf); err != nil {
 		return reconcile.Result{}, err
 	}
-	return reconcile.Result{}, r.createUserIdentitiesSecret()
+
+	if result, err := r.computeAndReconcileServerConf(serverConf, userCredSecret, adminCredSecret, reqLogger); result != nil {
+		if err != nil {
+			reqLogger.Error(err, "Error while computing and reconciling server configuration")
+		}
+		return *result, err
+	}
+
+	return reconcile.Result{}, nil
 }
 
-func (s *secretRequest) createUserIdentitiesSecret() error {
+func (r secretRequest) computeAndReconcileServerConf(serverConf *config.InfinispanConfiguration, userPropSecret, adminPropSecret *corev1.Secret, reqLogger logr.Logger) (*reconcile.Result, error) {
+	// Setup go template to process infinispan.xml and jgroups-relay.xml
+	funcMap := template.FuncMap{
+		"UpperCase":    strings.ToUpper,
+		"LowerCase":    strings.ToLower,
+		"ServerRoot":   func() string { return ServerRoot },
+		"ListAsString": func(elems []string) string { return strings.Join(elems, ",") },
+		"RemoteSites": func(elems []config.BackupSite) string {
+			var ret string
+			for i, bs := range elems {
+				ret += fmt.Sprintf("%s[%d]", bs.Address, bs.Port)
+				if i < len(elems)-1 {
+					ret += ","
+				}
+			}
+			return ret
+		},
+	}
+	var ispnXmlTemplate, jgroupsXmlTemplate string
+	if box, err := rice.FindBox("resources/"); err != nil {
+		return &reconcile.Result{}, err
+	} else {
+		if ispnXmlTemplate, err = box.String("ispnXmlTemplate.xmltmpl"); err != nil {
+			return &reconcile.Result{}, err
+		}
+		if jgroupsXmlTemplate, err = box.String("jgroupsXmlTemplate.xmltmpl"); err != nil {
+			return &reconcile.Result{}, err
+		}
+	}
+
+	// Generate infinispan.xml
+	name := r.infinispan.Name
+	namespace := r.infinispan.Namespace
+	infinispanXmlObject := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      r.infinispan.GetInfinispanXmlConfigName(),
+			Namespace: namespace,
+		},
+	}
+	tIspn, err := template.New("infinispan.xml").Funcs(funcMap).Parse(ispnXmlTemplate)
+	if err != nil {
+		return &reconcile.Result{}, err
+	}
+	buffIspn := new(bytes.Buffer)
+	err = tIspn.Execute(buffIspn, serverConf)
+	if err != nil {
+		return &reconcile.Result{}, err
+	}
+
+	var buffJGroups *bytes.Buffer
+	if serverConf.XSite != nil && len(serverConf.XSite.Backups) > 0 {
+		// Generate jgroups-relay.xml
+		tJGroups, err := template.New("jgroups-relay.xml").Funcs(funcMap).Parse(jgroupsXmlTemplate)
+		if err != nil {
+			return &reconcile.Result{}, err
+		}
+		buffJGroups = new(bytes.Buffer)
+		err = tJGroups.Execute(buffJGroups, serverConf)
+		if err != nil {
+			return &reconcile.Result{}, err
+		}
+	}
+
+	// Create admin and user identity properties from secrets
+	adminUsers, adminGroups, err := security.AuthPropsFromSecret(adminPropSecret.Data[consts.ServerIdentitiesFilename])
+	if err != nil {
+		return &reconcile.Result{}, err
+	}
+	var adminBash string
+	adminBash, err = security.IdentitiesCliFileFromSecret(adminPropSecret.Data[consts.ServerIdentitiesFilename], ServerRoot+"/conf/cli-admin-users.properties", ServerRoot+"/conf/cli-admin-groups.properties")
+	if err != nil {
+		return &reconcile.Result{}, err
+	}
+
+	var users, groups, usersBash string
+	//var usersBash string
+	if userPropSecret != nil {
+		users, groups, err = security.AuthPropsFromSecret(userPropSecret.Data[consts.ServerIdentitiesFilename])
+		if err != nil {
+			return &reconcile.Result{}, err
+		}
+		if usersBash, err = security.IdentitiesCliFileFromSecret(userPropSecret.Data[consts.ServerIdentitiesFilename], ServerRoot+"/conf/cli-users.properties", ServerRoot+"/conf/cli-groups.properties"); err != nil {
+			return &reconcile.Result{}, err
+		}
+	}
+	bash := adminBash + usersBash
+
+	// PEM certs need to be loaded and merget to be used by Infinispan
+	var pem []byte
+	if serverConf.Keystore.Type == "pem" {
+		keystoreSecret := &corev1.Secret{}
+		if result, err := kube.LookupResource(r.infinispan.GetKeystoreSecretName(), r.infinispan.Namespace, keystoreSecret, r.Client, reqLogger, r.eventRec, r.ctx); result != nil {
+			return &reconcile.Result{}, err
+		}
+		pem = append(keystoreSecret.Data["tls.key"], keystoreSecret.Data["tls.crt"]...)
+	}
+
+	// Create secret with all the objects to be mounted as "ServerRoot/conf/operator/"
+	result, err := controllerutil.CreateOrUpdate(r.ctx, r.Client, infinispanXmlObject, func() error {
+		infinispanXmlObject.Labels = LabelsResource(r.infinispan.Name, "infinispan-secret-admin-identities")
+		infinispanXmlObject.Data = map[string][]byte{"infinispan.xml": buffIspn.Bytes()}
+		if buffJGroups != nil {
+			infinispanXmlObject.Data["jgroups-relay.xml"] = buffJGroups.Bytes()
+		}
+		infinispanXmlObject.Data[consts.ServerUsersPropertiesFilename] = []byte(users)
+		infinispanXmlObject.Data[consts.ServerGroupsPropertiesFilename] = []byte(groups)
+		infinispanXmlObject.Data[consts.ServerAdminUsersPropertiesFilename] = []byte(adminUsers)
+		infinispanXmlObject.Data[consts.ServerAdminGroupsPropertiesFilename] = []byte(adminGroups)
+		infinispanXmlObject.Data[consts.ServerIdentitiesCliFilename] = []byte(bash)
+		infinispanXmlObject.Data[EncryptPemKeystoreName] = []byte(pem)
+		err = controllerutil.SetControllerReference(r.infinispan, infinispanXmlObject, r.scheme)
+		return err
+	})
+	if err != nil {
+		return &reconcile.Result{}, err
+	}
+	if result != controllerutil.OperationResultNone {
+		r.reqLogger.Info(fmt.Sprintf("ConfigMap '%s' %s", name, result))
+	}
+	return nil, nil
+}
+
+func (s *secretRequest) createUserIdentitiesSecret() (*corev1.Secret, error) {
 	identities, err := security.GetUserCredentials()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	return s.createSecret(s.infinispan.GetSecretName(), "infinispan-secret-identities", identities)
 }
 
-func (s *secretRequest) createSecret(name, label string, identities []byte) error {
+func (s *secretRequest) createSecret(name, label string, identities []byte) (*corev1.Secret, error) {
 	secret := &corev1.Secret{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "v1",
@@ -156,9 +313,9 @@ func (s *secretRequest) createSecret(name, label string, identities []byte) erro
 	})
 
 	if err != nil {
-		return fmt.Errorf("unable to create identities secret: %w", err)
+		return nil, fmt.Errorf("unable to create identities secret: %w", err)
 	}
-	return nil
+	return secret, nil
 }
 
 func (s *secretRequest) reconcileTruststoreSecret() (*reconcile.Result, error) {
@@ -230,7 +387,7 @@ func (s *secretRequest) reconcileTruststoreSecret() (*reconcile.Result, error) {
 	return nil, err
 }
 
-func (s *secretRequest) reconcileAdminSecret() error {
+func (s *secretRequest) reconcileAdminSecret(userSecret *corev1.Secret) (*corev1.Secret, error) {
 	adminSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      s.infinispan.GetAdminSecretName(),
@@ -270,7 +427,10 @@ func (s *secretRequest) reconcileAdminSecret() error {
 		adminSecret.Data[consts.ServerIdentitiesFilename] = identities
 		return nil
 	})
-	return err
+	if err != nil {
+		return nil, err
+	}
+	return adminSecret, nil
 }
 
 func (s *secretRequest) addCliProperties(secret *corev1.Secret, password string) {
