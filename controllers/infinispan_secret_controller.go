@@ -134,9 +134,8 @@ func (reconciler *SecretReconciler) Reconcile(ctx context.Context, request recon
 	}
 
 	// Reconcile Credential Secrets
-	var adminCredSecret *corev1.Secret
-	var err error
-	if adminCredSecret, err = r.reconcileAdminSecret(userCredSecret); err != nil {
+	adminCredSecret, err := r.reconcileAdminSecret()
+	if err != nil {
 		return reconcile.Result{}, err
 	}
 
@@ -181,7 +180,7 @@ func (r secretRequest) computeAndReconcileServerConf(serverConf *config.Infinisp
 		},
 	}
 	var ispnXmlTemplate, jgroupsXmlTemplate string
-	if box, err := rice.FindBox("resources/"); err != nil {
+	if box, err := rice.FindBox("resources"); err != nil {
 		return &reconcile.Result{}, err
 	} else {
 		if ispnXmlTemplate, err = box.String("ispnXmlTemplate.xmltmpl"); err != nil {
@@ -387,7 +386,7 @@ func (s *secretRequest) reconcileTruststoreSecret() (*reconcile.Result, error) {
 	return nil, err
 }
 
-func (s *secretRequest) reconcileAdminSecret(userSecret *corev1.Secret) (*corev1.Secret, error) {
+func (s *secretRequest) reconcileAdminSecret() (*corev1.Secret, error) {
 	adminSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      s.infinispan.GetAdminSecretName(),
