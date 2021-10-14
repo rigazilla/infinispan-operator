@@ -225,23 +225,14 @@ func (r secretRequest) computeAndReconcileServerConf(serverConf *config.Infinisp
 	}
 
 	// Create admin and user identity properties from secrets
-	adminUsers, adminGroups, err := security.AuthPropsFromSecret(adminPropSecret.Data[consts.ServerIdentitiesFilename])
-	if err != nil {
-		return &reconcile.Result{}, err
-	}
 	var adminBash string
 	adminBash, err = security.IdentitiesCliFileFromSecret(adminPropSecret.Data[consts.ServerIdentitiesFilename], ServerRoot+"/conf/cli-admin-users.properties", ServerRoot+"/conf/cli-admin-groups.properties")
 	if err != nil {
 		return &reconcile.Result{}, err
 	}
 
-	var users, groups, usersBash string
-	//var usersBash string
+	var usersBash string
 	if userPropSecret != nil {
-		users, groups, err = security.AuthPropsFromSecret(userPropSecret.Data[consts.ServerIdentitiesFilename])
-		if err != nil {
-			return &reconcile.Result{}, err
-		}
 		if usersBash, err = security.IdentitiesCliFileFromSecret(userPropSecret.Data[consts.ServerIdentitiesFilename], ServerRoot+"/conf/cli-users.properties", ServerRoot+"/conf/cli-groups.properties"); err != nil {
 			return &reconcile.Result{}, err
 		}
@@ -265,10 +256,6 @@ func (r secretRequest) computeAndReconcileServerConf(serverConf *config.Infinisp
 		if buffJGroups != nil {
 			infinispanXmlObject.Data["jgroups-relay.xml"] = buffJGroups.Bytes()
 		}
-		infinispanXmlObject.Data[consts.ServerUsersPropertiesFilename] = []byte(users)
-		infinispanXmlObject.Data[consts.ServerGroupsPropertiesFilename] = []byte(groups)
-		infinispanXmlObject.Data[consts.ServerAdminUsersPropertiesFilename] = []byte(adminUsers)
-		infinispanXmlObject.Data[consts.ServerAdminGroupsPropertiesFilename] = []byte(adminGroups)
 		infinispanXmlObject.Data[consts.ServerIdentitiesCliFilename] = []byte(bash)
 		infinispanXmlObject.Data[EncryptPemKeystoreName] = []byte(pem)
 		err = controllerutil.SetControllerReference(r.infinispan, infinispanXmlObject, r.scheme)

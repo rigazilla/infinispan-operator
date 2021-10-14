@@ -328,7 +328,6 @@ func (z *zeroCapacityController) zeroPodSpec(name, namespace string, configMap *
 	if err = yaml.Unmarshal([]byte(configMap.Data[consts.ServerConfigFilename]), serverConf); err != nil {
 		return nil, err
 	}
-	startupCmd := fmt.Sprintf(InfinispanStartupTemplate, serverConf.Keystore.Password, serverConf.Keystore.Alias, "")
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -345,8 +344,7 @@ func (z *zeroCapacityController) zeroPodSpec(name, namespace string, configMap *
 				Ports:          PodPorts(),
 				ReadinessProbe: PodReadinessProbe(),
 				Resources:      *podResources,
-				Command:        []string{"/bin/sh"},
-				Args:           []string{"-c", startupCmd},
+				Args:           buildStartupArgs(""),
 				VolumeMounts: []corev1.VolumeMount{
 					{
 						Name:      ConfigVolumeName,

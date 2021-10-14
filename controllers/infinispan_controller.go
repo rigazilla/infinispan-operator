@@ -61,8 +61,6 @@ const (
 	EventReasonEphemeralStorage      = "EphemeralStorageEnables"
 	EventReasonParseValueProblem     = "ParseValueProblem"
 	EventLoadBalancerUnsupported     = "LoadBalancerUnsupported"
-
-	InfinispanStartupTemplate = "[ -f /etc/encrypt/keystore/tls.crt ] && [ -f /etc/encrypt/keystore/tls.key ] && openssl pkcs12 -export -out /opt/infinispan/server/conf/keystore.p12 -in /etc/encrypt/keystore/tls.crt -inkey /etc/encrypt/keystore/tls.key -password pass:%s --name %s; exec /opt/infinispan/bin/server.sh -Dinfinispan.bind.address=$(POD_IP) %s -c operator/infinispan.xml"
 )
 
 // InfinispanReconciler reconciles a Infinispan object
@@ -1684,9 +1682,9 @@ func GossipRouterPodList(infinispan *infinispanv1.Infinispan, kube *kube.Kuberne
 func buildStartupArgs(overlayConfigMapKey string) []string {
 	var args []string
 	if overlayConfigMapKey != "" {
-		args = []string{"-Dinfinispan.bind.address=$(POD_IP)", "-c", "overlay/" + overlayConfigMapKey, "-c", "operator/infinispan.xml"}
+		args = []string{"-Dinfinispan.bind.address=0.0.0.0", "-c", "overlay/" + overlayConfigMapKey, "-c", "operator/infinispan.xml"}
 	} else {
-		args = []string{"-Dinfinispan.bind.address=$(POD_IP)", "-c", "operator/infinispan.xml"}
+		args = []string{"-Dinfinispan.bind.address=0.0.0.0", "-c", "operator/infinispan.xml"}
 	}
 	return args
 }
