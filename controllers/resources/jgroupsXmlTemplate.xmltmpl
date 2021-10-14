@@ -1,6 +1,6 @@
 <config xmlns="urn:org:jgroups"
 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-xsi:schemaLocation="urn:org:jgroups http://www.jgroups.org/schema/jgroups-4.0.xsd"
+xsi:schemaLocation="urn:org:jgroups http://www.jgroups.org/schema/jgroups-4.2.xsd"
 >
 
 {{if eq (.XSite.Transport | UpperCase) "TUNNEL" }}
