@@ -156,7 +156,7 @@ func IdentitiesCliFileFromSecret(buf []byte, usersFile, groupsFile string) (stri
 	}
 	var b strings.Builder
 	for _, cred := range creds.Credentials {
-		fmt.Fprintf(&b, "user create %s -p %s --groups %s --users-file %s --groups-file %s\n", cred.Username, cred.Password, strings.Join(cred.Roles, ","), usersFile, groupsFile)
+		fmt.Fprintf(&b, "user create --realm admin %s -p %s --groups %s --users-file %s --groups-file %s\n", cred.Username, cred.Password, strings.Join(cred.Roles, ","), usersFile, groupsFile)
 	}
 	return b.String(), nil
 }
