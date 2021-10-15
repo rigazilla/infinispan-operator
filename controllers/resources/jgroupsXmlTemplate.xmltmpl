@@ -4,7 +4,7 @@ xsi:schemaLocation="urn:org:jgroups http://www.jgroups.org/schema/jgroups-4.2.xs
 >
 
 {{if eq (.XSite.Transport | UpperCase) "TUNNEL" }}
-<TUNNEL bind_addr="${jgroups.relay.bind.address,infinispan.bind.address}"
+<TUNNEL bind_addr="${jgroups.relay.bind.address,jgroups.bind.address}"
 	bind_port="${jgroups.relay.bind.port:{{.JGroups.Relay.BindPort}} }"
 	enable_diagnostics="{{.JGroups.Diagnostics}}"
 	port_range="0"
