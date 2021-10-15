@@ -225,19 +225,19 @@ func (r secretRequest) computeAndReconcileServerConf(serverConf *config.Infinisp
 	}
 
 	// Create admin and user identity properties from secrets
-	var adminBash string
-	adminBash, err = security.IdentitiesCliFileFromSecret(adminPropSecret.Data[consts.ServerIdentitiesFilename], "admin", ServerRoot+"/conf/cli-admin-users.properties", ServerRoot+"/conf/cli-admin-groups.properties")
+	var adminCliBatch string
+	adminCliBatch, err = security.IdentitiesCliFileFromSecret(adminPropSecret.Data[consts.ServerIdentitiesFilename], "admin", ServerRoot+"/conf/cli-admin-users.properties", ServerRoot+"/conf/cli-admin-groups.properties")
 	if err != nil {
 		return &reconcile.Result{}, err
 	}
 
-	var usersBash string
+	var usersCliBatch string
 	if userPropSecret != nil {
-		if usersBash, err = security.IdentitiesCliFileFromSecret(userPropSecret.Data[consts.ServerIdentitiesFilename], "default", ServerRoot+"/conf/cli-users.properties", ServerRoot+"/conf/cli-groups.properties"); err != nil {
+		if usersCliBatch, err = security.IdentitiesCliFileFromSecret(userPropSecret.Data[consts.ServerIdentitiesFilename], "default", ServerRoot+"/conf/cli-users.properties", ServerRoot+"/conf/cli-groups.properties"); err != nil {
 			return &reconcile.Result{}, err
 		}
 	}
-	bash := adminBash + usersBash
+	cliBatch := adminCliBatch + usersCliBatch
 
 	// PEM certs need to be loaded and merget to be used by Infinispan
 	var pem []byte
@@ -256,7 +256,7 @@ func (r secretRequest) computeAndReconcileServerConf(serverConf *config.Infinisp
 		if buffJGroups != nil {
 			infinispanXmlObject.Data["jgroups-relay.xml"] = buffJGroups.Bytes()
 		}
-		infinispanXmlObject.Data[consts.ServerIdentitiesCliFilename] = []byte(bash)
+		infinispanXmlObject.Data[consts.ServerIdentitiesCliFilename] = []byte(cliBatch)
 		infinispanXmlObject.Data[EncryptPemKeystoreName] = []byte(pem)
 		err = controllerutil.SetControllerReference(r.infinispan, infinispanXmlObject, r.scheme)
 		return err
