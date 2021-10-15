@@ -226,14 +226,14 @@ func (r secretRequest) computeAndReconcileServerConf(serverConf *config.Infinisp
 
 	// Create admin and user identity properties from secrets
 	var adminBash string
-	adminBash, err = security.IdentitiesCliFileFromSecret(adminPropSecret.Data[consts.ServerIdentitiesFilename], ServerRoot+"/conf/cli-admin-users.properties", ServerRoot+"/conf/cli-admin-groups.properties")
+	adminBash, err = security.IdentitiesCliFileFromSecret(adminPropSecret.Data[consts.ServerIdentitiesFilename], "admin", ServerRoot+"/conf/cli-admin-users.properties", ServerRoot+"/conf/cli-admin-groups.properties")
 	if err != nil {
 		return &reconcile.Result{}, err
 	}
 
 	var usersBash string
 	if userPropSecret != nil {
-		if usersBash, err = security.IdentitiesCliFileFromSecret(userPropSecret.Data[consts.ServerIdentitiesFilename], ServerRoot+"/conf/cli-users.properties", ServerRoot+"/conf/cli-groups.properties"); err != nil {
+		if usersBash, err = security.IdentitiesCliFileFromSecret(userPropSecret.Data[consts.ServerIdentitiesFilename], "default", ServerRoot+"/conf/cli-users.properties", ServerRoot+"/conf/cli-groups.properties"); err != nil {
 			return &reconcile.Result{}, err
 		}
 	}

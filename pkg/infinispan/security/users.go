@@ -149,14 +149,14 @@ func AuthPropsFromSecret(buf []byte) (users, groups string, err error) {
 	return
 }
 
-func IdentitiesCliFileFromSecret(buf []byte, usersFile, groupsFile string) (string, error) {
+func IdentitiesCliFileFromSecret(buf []byte, realm, usersFile, groupsFile string) (string, error) {
 	var creds IdentitiesYaml
 	if err := yaml.Unmarshal(buf, &creds); err != nil {
 		return "", err
 	}
 	var b strings.Builder
 	for _, cred := range creds.Credentials {
-		fmt.Fprintf(&b, "user create --realm admin %s -p %s --groups %s --users-file %s --groups-file %s\n", cred.Username, cred.Password, strings.Join(cred.Roles, ","), usersFile, groupsFile)
+		fmt.Fprintf(&b, "user create %s --realm %s -p %s --groups %s --users-file %s --groups-file %s\n", cred.Username, realm, cred.Password, strings.Join(cred.Roles, ","), usersFile, groupsFile)
 	}
 	return b.String(), nil
 }
