@@ -1682,9 +1682,9 @@ func GossipRouterPodList(infinispan *infinispanv1.Infinispan, kube *kube.Kuberne
 func buildStartupArgs(overlayConfigMapKey string) []string {
 	var args []string
 	if overlayConfigMapKey != "" {
-		args = []string{"-Dinfinispan.bind.address=0.0.0.0", "-c", "overlay/" + overlayConfigMapKey, "-c", "operator/infinispan.xml"}
+		args = []string{"-Djgroups.bind.address=$(POD_IP)", "-Dinfinispan.bind.address=0.0.0.0", "-c", "overlay/" + overlayConfigMapKey, "-c", "operator/infinispan.xml"}
 	} else {
-		args = []string{"-Dinfinispan.bind.address=0.0.0.0", "-c", "operator/infinispan.xml"}
+		args = []string{"-Djgroups.bind.address=$(POD_IP)", "-Dinfinispan.bind.address=0.0.0.0", "-c", "operator/infinispan.xml"}
 	}
 	return args
 }
