@@ -365,7 +365,7 @@ func (z *zeroCapacityController) zeroPodSpec(name, namespace string, configMap *
 						MountPath: zeroSpec.Volume.MountPath,
 					}, {
 						Name:      InfinispanXmlVolumeName,
-						MountPath: ServerRoot + "/conf/operator",
+						MountPath: consts.ServerRoot + "/conf/operator",
 					},
 				},
 			}},

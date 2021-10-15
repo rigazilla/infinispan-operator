@@ -93,6 +93,7 @@ const (
 	ServerUserIdentitiesRoot            = ServerSecurityRoot + "/user"
 	ServerUserIdentitiesPath            = ServerUserIdentitiesRoot + "/" + ServerIdentitiesFilename
 	OverlayConfigPath                   = "/etc"
+	ServerRoot                          = "/opt/infinispan/server"
 
 	ServerHTTPBasePath         = "rest/v2"
 	ServerHTTPCacheManagerPath = ServerHTTPBasePath + "/cache-managers/" + DefaultCacheManagerName

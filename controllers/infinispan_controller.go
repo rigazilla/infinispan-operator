@@ -43,9 +43,8 @@ import (
 )
 
 const (
-	ServerRoot                  = "/opt/infinispan/server"
-	DataMountPath               = ServerRoot + "/data"
-	OperatorConfMountPath       = ServerRoot + "/conf/operator"
+	DataMountPath               = consts.ServerRoot + "/data"
+	OperatorConfMountPath       = consts.ServerRoot + "/conf/operator"
 	DataMountVolume             = "data-volume"
 	ConfigVolumeName            = "config-volume"
 	EncryptKeystoreVolumeName   = "encrypt-volume"
@@ -1085,7 +1084,7 @@ func (r *infinispanRequest) statefulSetForInfinispan(adminSecret, userSecret, us
 		MountPath: consts.ServerConfigRoot,
 	}, {
 		Name:      InfinispanXmlVolumeName,
-		MountPath: ServerRoot + "/conf/operator",
+		MountPath: consts.ServerRoot + "/conf/operator",
 	}, {
 		Name:      dataVolumeName,
 		MountPath: DataMountPath,

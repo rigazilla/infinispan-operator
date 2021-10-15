@@ -1,15 +1,11 @@
 package controllers
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net/url"
 	"strings"
 
-	"text/template"
-
-	rice "github.com/GeertJohan/go.rice"
 	"github.com/go-logr/logr"
 	ispnv1 "github.com/infinispan/infinispan-operator/api/v1"
 	consts "github.com/infinispan/infinispan-operator/controllers/constants"
@@ -162,78 +158,22 @@ func (reconciler *SecretReconciler) Reconcile(ctx context.Context, request recon
 }
 
 func (r secretRequest) computeAndReconcileServerConf(serverConf *config.InfinispanConfiguration, userPropSecret, adminPropSecret *corev1.Secret, reqLogger logr.Logger) (*reconcile.Result, error) {
-	// Setup go template to process infinispan.xml and jgroups-relay.xml
-	funcMap := template.FuncMap{
-		"UpperCase":    strings.ToUpper,
-		"LowerCase":    strings.ToLower,
-		"ServerRoot":   func() string { return ServerRoot },
-		"ListAsString": func(elems []string) string { return strings.Join(elems, ",") },
-		"RemoteSites": func(elems []config.BackupSite) string {
-			var ret string
-			for i, bs := range elems {
-				ret += fmt.Sprintf("%s[%d]", bs.Address, bs.Port)
-				if i < len(elems)-1 {
-					ret += ","
-				}
-			}
-			return ret
-		},
-	}
-	var ispnXmlTemplate, jgroupsXmlTemplate string
-	if box, err := rice.FindBox("resources"); err != nil {
-		return &reconcile.Result{}, err
-	} else {
-		if ispnXmlTemplate, err = box.String("ispnXmlTemplate.xmltmpl"); err != nil {
-			return &reconcile.Result{}, err
-		}
-		if jgroupsXmlTemplate, err = box.String("jgroupsXmlTemplate.xmltmpl"); err != nil {
-			return &reconcile.Result{}, err
-		}
-	}
 
-	// Generate infinispan.xml
-	name := r.infinispan.Name
-	namespace := r.infinispan.Namespace
-	infinispanXmlObject := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      r.infinispan.GetInfinispanXmlConfigName(),
-			Namespace: namespace,
-		},
-	}
-	tIspn, err := template.New("infinispan.xml").Funcs(funcMap).Parse(ispnXmlTemplate)
+	ispnXml, jgroupsXml, err := serverConf.InfinispanConfiguration()
 	if err != nil {
 		return &reconcile.Result{}, err
-	}
-	buffIspn := new(bytes.Buffer)
-	err = tIspn.Execute(buffIspn, serverConf)
-	if err != nil {
-		return &reconcile.Result{}, err
-	}
-
-	var buffJGroups *bytes.Buffer
-	if serverConf.XSite != nil && len(serverConf.XSite.Backups) > 0 {
-		// Generate jgroups-relay.xml
-		tJGroups, err := template.New("jgroups-relay.xml").Funcs(funcMap).Parse(jgroupsXmlTemplate)
-		if err != nil {
-			return &reconcile.Result{}, err
-		}
-		buffJGroups = new(bytes.Buffer)
-		err = tJGroups.Execute(buffJGroups, serverConf)
-		if err != nil {
-			return &reconcile.Result{}, err
-		}
 	}
 
 	// Create admin and user identity properties from secrets
 	var adminCliBatch string
-	adminCliBatch, err = security.IdentitiesCliFileFromSecret(adminPropSecret.Data[consts.ServerIdentitiesFilename], "admin", ServerRoot+"/conf/cli-admin-users.properties", ServerRoot+"/conf/cli-admin-groups.properties")
+	adminCliBatch, err = security.IdentitiesCliFileFromSecret(adminPropSecret.Data[consts.ServerIdentitiesFilename], "admin", consts.ServerRoot+"/conf/cli-admin-users.properties", consts.ServerRoot+"/conf/cli-admin-groups.properties")
 	if err != nil {
 		return &reconcile.Result{}, err
 	}
 
 	var usersCliBatch string
 	if userPropSecret != nil {
-		if usersCliBatch, err = security.IdentitiesCliFileFromSecret(userPropSecret.Data[consts.ServerIdentitiesFilename], "default", ServerRoot+"/conf/cli-users.properties", ServerRoot+"/conf/cli-groups.properties"); err != nil {
+		if usersCliBatch, err = security.IdentitiesCliFileFromSecret(userPropSecret.Data[consts.ServerIdentitiesFilename], "default", consts.ServerRoot+"/conf/cli-users.properties", consts.ServerRoot+"/conf/cli-groups.properties"); err != nil {
 			return &reconcile.Result{}, err
 		}
 	}
@@ -249,12 +189,20 @@ func (r secretRequest) computeAndReconcileServerConf(serverConf *config.Infinisp
 		pem = append(keystoreSecret.Data["tls.key"], keystoreSecret.Data["tls.crt"]...)
 	}
 
+	// Generate infinispan.xml
+	infinispanXmlObject := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      r.infinispan.GetInfinispanXmlConfigName(),
+			Namespace: r.infinispan.Namespace,
+		},
+	}
+
 	// Create secret with all the objects to be mounted as "ServerRoot/conf/operator/"
 	result, err := controllerutil.CreateOrUpdate(r.ctx, r.Client, infinispanXmlObject, func() error {
 		infinispanXmlObject.Labels = LabelsResource(r.infinispan.Name, "infinispan-secret-admin-identities")
-		infinispanXmlObject.Data = map[string][]byte{"infinispan.xml": buffIspn.Bytes()}
-		if buffJGroups != nil {
-			infinispanXmlObject.Data["jgroups-relay.xml"] = buffJGroups.Bytes()
+		infinispanXmlObject.Data = map[string][]byte{"infinispan.xml": []byte(ispnXml)}
+		if jgroupsXml != "" {
+			infinispanXmlObject.Data["jgroups-relay.xml"] = []byte(jgroupsXml)
 		}
 		infinispanXmlObject.Data[consts.ServerIdentitiesCliFilename] = []byte(cliBatch)
 		infinispanXmlObject.Data[EncryptPemKeystoreName] = []byte(pem)
@@ -265,7 +213,7 @@ func (r secretRequest) computeAndReconcileServerConf(serverConf *config.Infinisp
 		return &reconcile.Result{}, err
 	}
 	if result != controllerutil.OperationResultNone {
-		r.reqLogger.Info(fmt.Sprintf("ConfigMap '%s' %s", name, result))
+		r.reqLogger.Info(fmt.Sprintf("ConfigMap '%s' %s", r.infinispan.Name, result))
 	}
 	return nil, nil
 }
